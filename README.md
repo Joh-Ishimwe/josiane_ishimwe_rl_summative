@@ -1,37 +1,131 @@
+# 🚜 Agrika: Smart Tractor Fleet Management using Reinforcement Learning
 
-# Agrika: Smart Agricultural Fleet Management with Reinforcement Learning
+Welcome to **Agrika**, a reinforcement learning project designed to optimize tractor usage for smallholder farmers in Rwanda. This project simulates a 7-day farming week, managing tractor operations, maintenance, and rest — all while adapting to unpredictable weather and changing demand.
+
+ **[Project Demo Video](https://docs.google.com/document/d/1Fli-sQ-m-vozlKXEKDls4BHIMEFLYi7O8SJGh8Rogio/edit?usp=sharing)**  
+ **GitHub Repo**: https://github.com/Joh-Ishimwe/josiane_ishimwe_rl_summative
+
+---
 
 ## Project Overview
-This project implements a sophisticated reinforcement learning system for managing agricultural tractor fleets in Rwanda. The system optimizes maintenance scheduling, resource allocation, and operational decisions to maximize productivity while minimizing costs and equipment downtime.
 
-## Environment Features
-- **Rich State Space**: 15-dimensional observation including tractor conditions, weather forecasts, and seasonal demands
-- **Exhaustive Action Space**: 27 discrete actions covering all possible fleet management combinations
-- **3D Visualization**: Professional PyBullet-based rendering with real-time state updates
-- **Realistic Dynamics**: Weather effects, seasonal patterns, and breakdown probabilities
+Agrika is a custom Gymnasium environment built with PyBullet for realistic 3D simulation. It trains and compares four RL algorithms:
 
-## Implemented Algorithms
-1. **Deep Q-Network (DQN)** - Value-based learning
-2. **Proximal Policy Optimization (PPO)** - Policy gradient method
-3. **Advantage Actor-Critic (A2C)** - Actor-critic method  
-4. **REINFORCE** - Basic policy gradient approach
+- Deep Q-Network (DQN)
+- REINFORCE (Policy Gradient)
+- Proximal Policy Optimization (PPO)
+- Advantage Actor Critic (A2C)
 
-## Installation
+The objective is to **maximize productivity**, **minimize breakdowns**, and **reduce maintenance costs** in a dynamic environment.
+
+---
+
+## 🌾 Environment Details
+
+###  Agent
+
+- Controls 3 four-wheel tractors.
+- Attributes: Hours used, condition (0–100), days since last maintenance.
+- Affected by weather (rainy/dry) and work demand (low/moderate/high).
+
+###  Action Space
+
+- Discrete action space of 27 combinations.
+- Each tractor can:  
+  `0 = Rest`, `1 = Operate`, `2 = Maintain`  
+  Example: `(0, 2, 1)` means T1 rests, T2 is maintained, T3 works.
+
+###  State Space
+
+13-dimensional vector:
+- 9 for tractor attributes
+- 2 for weather (today and tomorrow)
+- 1 for the current day
+- 1 for work demand
+
+###  Reward Function
+
+Reward = Productivity - Maintenance Penalty - Breakdown Penalty
+
+
+- Positive reward for productivity (higher on dry days).
+- Penalty for maintenance (-0.5).
+- Penalty for breakdowns (based on probability).
+
+###  Visualization
+
+- Built with **PyBullet**
+- 3D environment: tractors, fields, weather effects, and zones
+
+---
+
+##  Implemented RL Algorithms
+
+### ✅ DQN
+- 3-layer neural network
+- Experience replay buffer: 10,000
+- Epsilon-greedy strategy
+- Target network updates
+
+### ✅ REINFORCE
+- Policy gradient method with dropout and entropy regularization
+- Curriculum learning to improve adaptability
+
+### ✅ PPO
+- Clipped objective
+- Parallelized training (vectorized environments)
+- Best performance overall
+
+### ✅ A2C
+- Combined policy/value networks
+- Advantage estimation for lower variance
+
+---
+
+##  Hyperparameters Summary
+
+| Algorithm   | Learning Rate | Gamma | Batch Size | Notable Features             |
+|------------|---------------|--------|------------|------------------------------|
+| DQN        | 0.0005        | 0.99   | 64         | Experience Replay            |
+| PPO        | 0.0003        | 0.99   | 128        | Clipped Objective            |
+| A2C        | 0.0003        | 0.99   | 128        | N-Step = 2048                |
+| REINFORCE  | 0.0002        | 0.99   | 128        | Entropy Coefficient = 0.1    |
+
+---
+
+##  Performance Metrics
+
+| Metric               | PPO      | A2C      | DQN      | REINFORCE |
+|----------------------|----------|----------|----------|-----------|
+| Cumulative Reward     | ✅ ~240  | ✅ ~230  | ~150     | ~170      |
+| Training Stability    | ✅ Stable| ✅ Stable| Fluctuate| Increase   |
+| Episodes to Converge  | ~1,000   | ~1,000   | ~1,500   | ~2,000     |
+| Generalization        | ✅ Best  | Good     | Poor     | Moderate   |
+
+---
+
+##  Key Insights
+
+- **PPO** had the best overall performance in productivity and generalization.
+- **A2C** was stable and competitive.
+- **DQN** struggled with large action space.
+- **REINFORCE** had high variance, requiring careful tuning.
+
+---
+
+##  How to Run the Project
+
+1. Clone the repo:
+
 ```bash
+git clone https://github.com/Joh-Ishimwe/josiane_ishimwe_rl_summative.git
+cd josiane_ishimwe_rl_summative
+```
+2. Install dependencies:
+```
 pip install -r requirements.txt
 ```
-
-## Usage
-```bash
-# Train all models
-python main.py --mode train --algorithm all
-
-# Train specific algorithm
-python main.py --mode train --algorithm dqn
-
-# Run 3D visualization
-python main.py --mode visualize
-```
+3. Run training
 
 ## Project Structure
 ```
@@ -42,9 +136,6 @@ josiane_ishimwe_rl_summative/
 ├── logs/                # Training logs and tensorboard data
 └── main.py              # Main entry point
 ```
-
-## Results
-[Add your results after training]
 
 ## Author
 Josiane Ishimwe - Software Engineering Student, African Leadership University
