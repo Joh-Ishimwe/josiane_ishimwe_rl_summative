@@ -1,145 +1,334 @@
+#reinforce_training.py
+"""
+Enhanced REINFORCE Training Script
+This script implements an improved REINFORCE agent with baseline reduction, entropy regularization,
+gradient clipping, learning rate scheduling, and early stopping.
+"""
 import os
-import numpy as np
-from stable_baselines3 import A2C
-from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.results_plotter import load_results, ts2xy
-import matplotlib.pyplot as plt
-import optuna
 import sys
+import time
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from typing import List, Tuple, Dict, Any
+
+# Add environment to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'environment')))
 from agrika_env import AgrikaTractorFleetEnv
 
-class TrainingCallback(BaseCallback):
-    """Custom callback to track training metrics and detect convergence"""
-    def __init__(self, log_dir, window_size=100, reward_threshold=3000, std_threshold=100):
-        super().__init__(verbose=0)
-        self.log_dir = log_dir
+class ImprovedREINFORCEAgent:
+    """
+    Enhanced REINFORCE agent with baseline reduction for optimal stability
+    Features: Value baseline, entropy regularization, gradient clipping, LR scheduling, early stopping
+    """
+    
+    def __init__(self, state_dim: int, action_dim: int, 
+                 learning_rate: float = 0.0007, gamma: float = 0.996,
+                 entropy_coef: float = 0.025, baseline_coef: float = 0.6,
+                 max_grad_norm: float = 0.5):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.learning_rate = learning_rate
+        self.gamma = gamma
+        self.entropy_coef = entropy_coef
+        self.baseline_coef = baseline_coef
+        self.max_grad_norm = max_grad_norm
+        
+        self.policy_net = nn.Sequential(
+            nn.Linear(state_dim, 256), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(256, 256), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, action_dim), nn.Softmax(dim=-1)
+        )
+        
+        self.value_net = nn.Sequential(
+            nn.Linear(state_dim, 256), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(256, 256), nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        
+        self.policy_optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
+        self.value_optimizer = optim.Adam(self.value_net.parameters(), lr=learning_rate * 0.5)
+        
+        self.policy_scheduler = optim.lr_scheduler.StepLR(self.policy_optimizer, step_size=500, gamma=0.95)
+        self.value_scheduler = optim.lr_scheduler.StepLR(self.value_optimizer, step_size=500, gamma=0.95)
+        
+        self.episode_states = []
+        self.episode_actions = []
         self.episode_rewards = []
-        self.raw_rewards = []
-        self.episode_lengths = []
-        self.window_size = window_size
-        self.reward_threshold = reward_threshold
-        self.std_threshold = std_threshold
-        os.makedirs(log_dir, exist_ok=True)
-
-    def _on_step(self):
-        if self.locals.get('dones', [False])[0]:
-            episode_reward = self.locals['rewards'][-1]
-            raw_reward = self.locals['infos'][-1].get('raw_reward', episode_reward)
-            episode_length = self.locals['infos'][-1].get('day', 60)
-            self.episode_rewards.append(episode_reward)
-            self.raw_rewards.append(raw_reward)
-            self.episode_lengths.append(episode_length)
-            if len(self.raw_rewards) >= self.window_size:
-                mean_raw_reward = np.mean(self.raw_rewards[-self.window_size:])
-                std_raw_reward = np.std(self.raw_rewards[-self.window_size:])
-                with open(f"{self.log_dir}/training_metrics.txt", "a") as f:
-                    f.write(f"Episode {len(self.episode_rewards)}: Mean Raw Reward = {mean_raw_reward:.2f}, Std = {std_raw_reward:.2f}, Length = {episode_length}\n")
-                if mean_raw_reward > self.reward_threshold and std_raw_reward < self.std_threshold:
-                    print(f"Converged at episode {len(self.episode_rewards)}: Mean Raw Reward = {mean_raw_reward:.2f}, Std = {std_raw_reward:.2f}")
-                    return False  # Stop training
-        return True
-
-    def _on_training_end(self):
-        np.savetxt(f"{self.log_dir}/raw_rewards.csv", self.raw_rewards, delimiter=",")
-
-def plot_learning_curve(log_dir="logs/reinforce", output_path="logs/reinforce/learning_curve.png"):
-    """Plot learning curve from monitor logs"""
-    try:
-        results = load_results(log_dir)
-        if len(results) == 0:
-            print(f"No data found in {log_dir}/monitor.csv")
-            return
-        x, y = ts2xy(results, 'timesteps')
-        raw_y = (y + 1) / 2 * (500 - (-600)) + (-600)  # Convert normalized to raw
-        plt.figure(figsize=(10, 6))
-        plt.plot(x, raw_y, label="Mean Episode Raw Reward", color="#1f77b4")
-        plt.xlabel("Timesteps")
-        plt.ylabel("Mean Episode Raw Reward")
-        plt.title("REINFORCE-like Learning Curve")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(output_path, dpi=300)
-        plt.close()
-    except Exception as e:
-        print(f"Error generating learning curve: {str(e)}")
-
-def train_reinforce_like(trial=None, total_timesteps=500000):
-    """Train REINFORCE-like agent using A2C with optimized settings"""
-    os.makedirs("models/pg/reinforce", exist_ok=True)
-    log_dir = f"logs/reinforce/trial_{trial.number}" if trial else "logs/reinforce"
-    os.makedirs(log_dir, exist_ok=True)
+        self.episode_log_probs = []
+        
+        self.training_stats = {
+            'policy_losses': [], 'value_losses': [], 'entropies': [], 'advantages': [],
+            'best_reward': -float('inf'), 'no_improvement': 0, 'patience': 15
+        }
     
-    print(f"🚀 Starting REINFORCE-like Training (Trial {trial.number if trial else 'Default'})")
-    print("Note: Using A2C with settings approximating REINFORCE")
+    def select_action(self, state: np.ndarray, training: bool = True) -> int:
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad() if not training else torch.enable_grad():
+            action_probs = self.policy_net(state_tensor)
+        if training:
+            action_dist = torch.distributions.Categorical(action_probs)
+            action = action_dist.sample()
+            log_prob = action_dist.log_prob(action)
+            self.episode_states.append(state)
+            self.episode_actions.append(action.item())
+            self.episode_log_probs.append(log_prob)
+            return action.item()
+        return torch.argmax(action_probs).item()
     
-    env = make_vec_env(AgrikaTractorFleetEnv, n_envs=1, monitor_dir=log_dir, env_kwargs={"normalize_rewards": True})
-    eval_env = Monitor(AgrikaTractorFleetEnv(normalize_rewards=True), filename=f"{log_dir}/eval_monitor.csv")
+    def store_reward(self, reward: float):
+        self.episode_rewards.append(reward)
     
-    model_params = {
-        "policy": "MlpPolicy",
-        "env": env,
-        "learning_rate": trial.suggest_categorical("learning_rate", [1e-5, 5e-5, 1e-4]) if trial else 0.0005,
-        "n_steps": 60,  # Matches season_length
-        "gamma": 0.99,
-        "gae_lambda": 1.0,  # REINFORCE-like
-        "ent_coef": trial.suggest_categorical("ent_coef", [0.03, 0.05, 0.1]) if trial else 0.03,
-        "vf_coef": trial.suggest_categorical("vf_coef", [0.25, 0.5]) if trial else 0.5,
-        "max_grad_norm": 0.5,
-        "use_rms_prop": False,  # Use Adam
-        "policy_kwargs": dict(
-            net_arch=dict(
-                pi=[128, 64],  # Policy network
-                vf=[128, 64]   # Larger value network
-            )
-        ),
-        "tensorboard_log": log_dir,
-        "verbose": 1,
-        "device": "auto"
+    def compute_returns_and_advantages(self):
+        returns = []
+        advantages = []
+        states = torch.FloatTensor(np.array(self.episode_states))
+        rewards = torch.FloatTensor(self.episode_rewards)
+        G = 0
+        for reward in reversed(self.episode_rewards):
+            G = reward + self.gamma * G
+            returns.insert(0, G)
+        returns = torch.FloatTensor(returns)
+        with torch.no_grad():
+            baselines = self.value_net(states).squeeze()
+        advantages = returns - baselines
+        if len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        return returns, advantages, baselines
+    
+    def update_policy(self):
+        if not self.episode_rewards:
+            return {'policy_loss': 0.0, 'value_loss': 0.0, 'entropy': 0.0}, 0.0
+        
+        returns, advantages, baselines = self.compute_returns_and_advantages()
+        states = torch.FloatTensor(np.array(self.episode_states))
+        log_probs = torch.stack(self.episode_log_probs)
+        
+        policy_loss = -(log_probs * advantages.detach()).mean()
+        action_probs = self.policy_net(states)
+        entropy = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=1).mean()
+        total_policy_loss = policy_loss - self.entropy_coef * entropy
+        
+        current_values = self.value_net(states).squeeze()
+        value_loss = F.mse_loss(current_values, returns)
+        
+        self.policy_optimizer.zero_grad()
+        total_policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.max_grad_norm)
+        self.policy_optimizer.step()
+        self.policy_scheduler.step()
+        
+        self.value_optimizer.zero_grad()
+        value_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.value_net.parameters(), self.max_grad_norm)
+        self.value_optimizer.step()
+        self.value_scheduler.step()
+        
+        stats = {
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'entropy': entropy.item(),
+            'mean_advantage': advantages.mean().item(),
+            'mean_return': returns.mean().item()
+        }
+        for key, value in stats.items():
+            if key in self.training_stats:
+                self.training_stats[key].append(value)
+        
+        current_reward = returns.mean().item()
+        if current_reward > self.training_stats['best_reward']:
+            self.training_stats['best_reward'] = current_reward
+            self.training_stats['no_improvement'] = 0
+        else:
+            self.training_stats['no_improvement'] += 1
+        
+        self._clear_episode_data()
+        return stats, current_reward
+    
+    def _clear_episode_data(self):
+        self.episode_states.clear()
+        self.episode_actions.clear()
+        self.episode_rewards.clear()
+        self.episode_log_probs.clear()
+    
+    def save(self, filepath: str):
+        torch.save({
+            'policy_net_state_dict': self.policy_net.state_dict(),
+            'value_net_state_dict': self.value_net.state_dict(),
+            'policy_optimizer_state_dict': self.policy_optimizer.state_dict(),
+            'value_optimizer_state_dict': self.value_optimizer.state_dict(),
+            'training_stats': self.training_stats,
+            'hyperparameters': {
+                'state_dim': self.state_dim, 'action_dim': self.action_dim,
+                'learning_rate': self.learning_rate, 'gamma': self.gamma,
+                'entropy_coef': self.entropy_coef, 'baseline_coef': self.baseline_coef
+            }
+        }, filepath)
+    
+    def load(self, filepath: str):
+        checkpoint = torch.load(filepath)
+        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+        self.value_net.load_state_dict(checkpoint['value_net_state_dict'])
+        self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state_dict'])
+        self.value_optimizer.load_state_dict(checkpoint['value_optimizer_state_dict'])
+        self.training_stats = checkpoint.get('training_stats', self.training_stats)
+
+def train_reinforce_separately(episodes=2000, curriculum_stages=4):
+    print("🌾 Starting Standalone Enhanced REINFORCE Training")
+    print("=" * 50)
+    print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')} CAT")
+    print()
+
+    # Create necessary directories
+    os.makedirs("models/optimized_reinforce", exist_ok=True)
+    os.makedirs("results/optimized_training", exist_ok=True)
+
+    env = AgrikaTractorFleetEnv()
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+
+    agent = ImprovedREINFORCEAgent(
+        state_dim=state_dim, action_dim=action_dim,
+        learning_rate=0.0007, gamma=0.996,
+        entropy_coef=0.025, baseline_coef=0.6,
+        max_grad_norm=0.5
+    )
+    
+    start_time = time.time()
+    episodes_per_stage = episodes // curriculum_stages
+    
+    curriculum_params = [
+        {'max_weather_changes': 2, 'breakdown_multiplier': 0.4},
+        {'max_weather_changes': 4, 'breakdown_multiplier': 0.7},
+        {'max_weather_changes': 6, 'breakdown_multiplier': 1.0},
+        {'max_weather_changes': 8, 'breakdown_multiplier': 1.3}
+    ]
+    
+    training_history = {
+        'episode_rewards': [], 'episode_lengths': [], 'policy_losses': [],
+        'value_losses': [], 'entropies': []
     }
     
-    model = A2C(**model_params)
+    for stage, stage_params in enumerate(curriculum_params):
+        print(f"\n📚 Curriculum Stage {stage + 1}/{curriculum_stages}")
+        stage_rewards = []
+        
+        for episode in range(episodes_per_stage):
+            global_episode = stage * episodes_per_stage + episode
+            # Use options parameter to pass curriculum settings
+            try:
+                obs, info = env.reset(options=stage_params)  # Pass as options dictionary
+            except TypeError as e:
+                print(f"❌ Reset failed with options: {e}")
+                print(f"Stage params: {stage_params}")
+                return
+            except Exception as e:
+                print(f"❌ Unexpected error during reset: {e}")
+                print(f"Stage params: {stage_params}")
+                return
+                
+            episode_reward = 0
+            episode_length = 0
+            
+            while True:
+                action = agent.select_action(obs, training=True)
+                obs, reward, terminated, truncated, info = env.step(action)
+                agent.store_reward(reward)
+                episode_reward += reward
+                episode_length += 1
+                if terminated or truncated:
+                    break
+            
+            stats, current_reward = agent.update_policy()
+            training_history['episode_rewards'].append(episode_reward)
+            training_history['episode_lengths'].append(episode_length)
+            training_history['policy_losses'].append(stats['policy_loss'])
+            training_history['value_losses'].append(stats['value_loss'])
+            training_history['entropies'].append(stats['entropy'])
+            
+            stage_rewards.append(episode_reward)
+            
+            if agent.training_stats['no_improvement'] >= agent.training_stats['patience']:
+                print(f"Early stopping triggered at episode {global_episode}")
+                break
+            
+            if (episode + 1) % 100 == 0:
+                avg_reward = np.mean(stage_rewards[-100:])
+                print(f"   Episode {global_episode + 1} | Avg Reward: {avg_reward:.2f}")
+        
+        stage_avg = np.mean(stage_rewards)
+        print(f"   Stage {stage + 1} completed - Average reward: {stage_avg:.2f}")
+        agent.save(f'models/optimized_reinforce/reinforce_stage_{stage + 1}.pt')
     
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=f"{log_dir}/best_model",
-        log_path=log_dir,
-        eval_freq=5000,
-        deterministic=True,
-        n_eval_episodes=20,  # More episodes for reliable std dev
-        render=False
-    )
+    training_time = time.time() - start_time
+    eval_rewards = []
+    for _ in range(50):
+        try:
+            obs, info = env.reset(options=curriculum_params[-1])  # Use last stage for evaluation
+        except TypeError:
+            obs, info = env.reset()  # Fallback to default reset if options fail
+        episode_reward = 0
+        while True:
+            action = agent.select_action(obs, training=False)
+            obs, reward, terminated, truncated, info = env.step(action)
+            episode_reward += reward
+            if terminated or truncated:
+                break
+        eval_rewards.append(episode_reward)
     
-    training_callback = TrainingCallback(log_dir=log_dir)
+    mean_reward = np.mean(eval_rewards)
+    std_reward = np.std(eval_rewards)
+    agent.save('models/optimized_reinforce/final_improved_reinforce.pt')
     
-    print(f"Training for {total_timesteps} timesteps...")
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=[eval_callback, training_callback],
-        progress_bar=True,
-        tb_log_name=f"reinforce_like_trial_{trial.number}" if trial else "reinforce_like"
-    )
+    with open('results/optimized_training/reinforce_training_history.json', 'w') as f:
+        json.dump({
+            'training_summary': {
+                'episodes': episodes,
+                'training_time_minutes': training_time / 60,
+                'final_mean_reward': mean_reward,
+                'final_std_reward': std_reward
+            },
+            'training_history': {k: v for k, v in training_history.items()}
+        }, f, indent=2)
     
-    model.save(f"{log_dir}/final_reinforce_model")
-    env.close()
-    eval_env.close()
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle('Enhanced REINFORCE Training Analysis')
     
-    print(f"✅ Training completed for trial {trial.number if trial else 'Default'}!")
+    episodes = len(training_history['episode_rewards'])
+    episode_range = range(1, episodes + 1)
     
-    mean_reward, std_reward = evaluate_policy(model, eval_env, n_eval_episodes=20, return_episode_rewards=True)
-    raw_rewards = [(r + 1) / 2 * (500 - (-600)) + (-600) for r in mean_reward]
-    return np.mean(raw_rewards) - np.std(raw_rewards)  # Objective for optuna
-
-def tune_reinforce_like():
-    """Run hyperparameter tuning with optuna"""
-    study = optuna.create_study(direction="maximize")
-    study.optimize(train_reinforce_like, n_trials=3)  # Reduced to 3 trials
-    print("Best parameters:", study.best_params)
-    print("Best value:", study.best_value)
-    return study
+    ax1.plot(episode_range, training_history['episode_rewards'], alpha=0.3, color='blue')
+    window_size = min(100, episodes // 10)
+    if window_size > 1:
+        moving_avg = np.convolve(training_history['episode_rewards'], np.ones(window_size)/window_size, mode='valid')
+        ax1.plot(range(window_size, episodes + 1), moving_avg, color='red', linewidth=2)
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Episode Reward')
+    ax1.set_title('Learning Progress')
+    ax1.grid(True, alpha=0.3)
+    
+    ax2.plot(episode_range, training_history['policy_losses'], label='Policy Loss')
+    ax2.plot(episode_range, training_history['value_losses'], label='Value Loss')
+    ax2.set_xlabel('Episode')
+    ax2.set_ylabel('Loss')
+    ax2.set_title('Training Losses')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('results/optimized_training/reinforce_analysis.png', dpi=300)
+    plt.close()
+    
+    print(f"\n✅ Enhanced REINFORCE completed! Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+    print(f"Training time: {training_time / 60:.1f} minutes")
+    print(f"Finished at: {time.strftime('%Y-%m-%d %H:%M:%S')} CAT")
+    print("📁 Results saved to 'results/optimized_training/' and 'models/optimized_reinforce/'")
 
 if __name__ == "__main__":
-    study = tune_reinforce_like()
+    train_reinforce_separately()

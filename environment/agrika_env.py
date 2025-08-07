@@ -1,5 +1,4 @@
-#agrika_env.py
-
+# environment/agrika_env.py
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -8,153 +7,133 @@ from typing import Tuple, Dict, Any
 import random
 
 class AgrikaTractorFleetEnv(gym.Env):
+    """
+    Agricultural Tractor Fleet Management Environment for Agrika
+    
+    Environment:
+    - Runs for 7 days (week)
+    - Tracks 3 tractors
+    - Daily conditions: Weather (Rainy/Dry), Demand (High/Low/Moderate)
+    
+    State Space (13 dimensions):
+    - Tractor 1: [hours_used, condition, days_since_maintenance] (3)
+    - Tractor 2: [hours_used, condition, days_since_maintenance] (3)
+    - Tractor 3: [hours_used, condition, days_since_maintenance] (3)
+    - Weather: [today, next_day] (2, 0=Rainy, 1=Dry)
+    - Season: [day_in_season, working_demand] (2, demand: 0=Low, 1=Moderate, 2=High)
+    
+    Action Space: 27 discrete actions (3^3 combinations)
+    - For each tractor: [OPERATE (0), MAINTAIN (1), REST (2)]
+    
+    Reward Function:
+    - High rewards for meeting high demand in dry season
+    - Penalties for operating in rainy season
+    - Bonuses for timely maintenance
+    """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
     
-    def __init__(self, render_mode=None, normalize_rewards=True):
+    def __init__(self, render_mode=None):
         super().__init__()
-        self.season_length = 60
+        
+        # Environment parameters
+        self.season_length = 7  # 7-day week
         self.num_tractors = 3
-        self.max_hours_per_day = 12
-        self.breakdown_threshold = 80
+        self.max_hours_per_day = 8
+        self.breakdown_threshold = 100  # hours before high breakdown risk
+        
+        # State space: 13 dimensions
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            high=np.array([100, 100, 30, 100, 100, 30, 100, 100, 30, 3, 3, 3, 3, 60, 100]),
+            low=np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            high=np.array([150, 100, 30, 150, 100, 30, 150, 100, 30, 1, 1, 60, 2]),
             dtype=np.float32
         )
+        
+        # Action space: 27 discrete actions (3^3)
         self.action_space = spaces.Discrete(27)
-        self.weather_types = ['Sunny', 'Rainy', 'Stormy', 'Dry']
-        self.render_mode = render_mode
-        self.normalize_rewards = normalize_rewards
-        self.reward_buffer = []  # For running mean/std
-        self.reward_mean = 0.0
-        self.reward_std = 1.0
-        self.reset()
-
-    def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
-        super().reset(seed=seed)
-        self.tractors = np.array([
-            [0.0, 100.0, 0.0],
-            [0.0, 100.0, 0.0],
-            [0.0, 100.0, 0.0]
-        ])
-        self.weather = np.random.randint(0, 4, size=4)
-        self.current_day = 0
-        self.crop_demand = self._calculate_crop_demand()
-        self.total_productivity = 0.0
-        self.total_maintenance_cost = 0.0
-        self.breakdown_count = 0
-        self.reward_buffer = []  # Reset buffer
-        self.reward_mean = 0.0
-        self.reward_std = 1.0
-        return self._get_observation(), {}
-
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        tractor_actions = self.decode_action(action)
-        daily_productivity = 0.0
-        daily_maintenance_cost = 0.0
-        daily_breakdown_penalty = 0.0
         
-        for i, tractor_action in enumerate(tractor_actions):
-            if tractor_action == 0:  # OPERATE
-                productivity, breakdown = self._operate_tractor(i)
-                daily_productivity += productivity
-                if breakdown:
-                    daily_breakdown_penalty += 200
-                    self.breakdown_count += 1
-            elif tractor_action == 1:  # MAINTAIN
-                cost = self._maintain_tractor(i)
-                daily_maintenance_cost += cost
-            elif tractor_action == 2:  # REST
-                self._rest_tractor(i)
+        # Weather types: 0=Rainy, 1=Dry
+        self.weather_types = ['Rainy', 'Dry']
         
-        self._update_environment()
-        raw_reward = self._calculate_reward(
-            daily_productivity, 
-            daily_maintenance_cost, 
-            daily_breakdown_penalty
-        )
+        # Demand types: 0=Low, 1=Moderate, 2=High
+        self.demand_types = ['Low', 'Moderate', 'High']
         
-        # Normalize reward
-        if self.normalize_rewards:
-            self.reward_buffer.append(raw_reward)
-            if len(self.reward_buffer) > 1000:
-                self.reward_buffer.pop(0)
-            self.reward_mean = np.mean(self.reward_buffer)
-            self.reward_std = np.std(self.reward_buffer) + 1e-8
-            reward = (raw_reward - self.reward_mean) / self.reward_std
-        else:
-            reward = raw_reward
-        
-        terminated = self.current_day >= self.season_length
-        info = {
-            'day': self.current_day,
-            'productivity': daily_productivity,
-            'maintenance_cost': daily_maintenance_cost,
-            'breakdowns': self.breakdown_count,
-            'weather': self.weather_types[self.weather[0]],
-            'raw_reward': raw_reward  # Log raw reward for analysis
+        # Performance tracking
+        self.episode_stats = {
+            'total_productivity': 0.0,
+            'total_maintenance_cost': 0.0,
+            'breakdown_count': 0,
+            'efficiency_score': 0.0
         }
         
-        return self._get_observation(), reward, terminated, False, info
+        # Store current tractor actions for reward calculation
+        self.current_tractor_actions = [0, 0, 0]
         
+        self.reset()
+        self.render_mode = render_mode
+    
     def decode_action(self, action: int) -> Tuple[int, int, int]:
         """Convert discrete action to individual tractor actions"""
-        # Convert base-10 to base-3 representation
         tractor3_action = action % 3
         tractor2_action = (action // 3) % 3
         tractor1_action = (action // 9) % 3
         return tractor1_action, tractor2_action, tractor3_action
     
-    def reset(self, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
-        super().reset(seed=seed)
+    def reset(self, seed=None, options=None):
+        if options:
+            max_weather_changes = options.get('max_weather_changes', 6)
+            breakdown_multiplier = options.get('breakdown_multiplier', 1.0)
         
-        # Initialize tractors: [hours_used, condition, days_since_maintenance]
+        # Initialize tractors with slight randomness
         self.tractors = np.array([
-            [0.0, 100.0, 0.0],  # Tractor 1
-            [0.0, 100.0, 0.0],  # Tractor 2  
-            [0.0, 100.0, 0.0]   # Tractor 3
+            [random.uniform(0, 5), random.uniform(85, 100), 0.0],  # Tractor 1
+            [random.uniform(0, 5), random.uniform(85, 100), 0.0],  # Tractor 2
+            [random.uniform(0, 5), random.uniform(85, 100), 0.0]   # Tractor 3
         ])
         
-        # Initialize weather (4 days: current + 3-day forecast)
-        self.weather = np.random.randint(0, 4, size=4)
+        # Initialize weather (Rainy or Dry)
+        self.weather = np.random.randint(0, 2, size=2)  # Today, next day
         
         # Season progress
         self.current_day = 0
-        self.crop_demand = self._calculate_crop_demand()
+        self.working_demand = self._calculate_working_demand()
         
-        # Performance tracking
-        self.total_productivity = 0.0
-        self.total_maintenance_cost = 0.0
-        self.breakdown_count = 0
+        # Reset episode stats
+        self.episode_stats = {
+            'total_productivity': 0.0,
+            'total_maintenance_cost': 0.0,
+            'breakdown_count': 0,
+            'efficiency_score': 0.0
+        }
+        
+        # Reset current actions
+        self.current_tractor_actions = [0, 0, 0]
         
         return self._get_observation(), {}
     
-    def _calculate_crop_demand(self) -> float:
-        """Calculate crop demand based on season day (realistic farming patterns)"""
-        # Higher demand during planting (days 1-20) and harvest (days 40-60)
-        if self.current_day <= 20:
-            return 70 + 30 * np.sin(np.pi * self.current_day / 20)
-        elif 20 < self.current_day <= 40:
-            return 30 + 20 * np.sin(np.pi * (self.current_day - 20) / 20)
-        else:  # Harvest season
-            return 80 + 20 * np.sin(np.pi * (self.current_day - 40) / 20)
+    def _calculate_working_demand(self) -> float:
+        """Calculate working demand based on season (0=Low, 1=Moderate, 2=High)"""
+        if self.current_day <= 20:  # Planting (high demand)
+            return 2  # High
+        elif 20 < self.current_day <= 40:  # Growing (low demand)
+            return 0  # Low
+        else:  # Harvest (moderate demand)
+            return 1  # Moderate
     
     def _get_observation(self) -> np.ndarray:
         """Get current state observation"""
         obs = np.concatenate([
-            self.tractors.flatten(),  # 9 values (3 tractors × 3 attributes)
-            self.weather.astype(np.float32),  # 4 values (current + 3-day forecast)
-            [self.current_day, self.crop_demand]  # 2 values
+            self.tractors.flatten(),  # 9 dimensions
+            self.weather.astype(np.float32),  # 2 dimensions
+            [self.current_day, self.working_demand]  # 2 dimensions
         ])
         return obs.astype(np.float32)
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Execute one step in the environment"""
-        
-        # Decode action for each tractor
         tractor_actions = self.decode_action(action)
+        self.current_tractor_actions = list(tractor_actions)
         
-        # Initialize daily metrics
+        # Daily metrics
         daily_productivity = 0.0
         daily_maintenance_cost = 0.0
         daily_breakdown_penalty = 0.0
@@ -166,7 +145,7 @@ class AgrikaTractorFleetEnv(gym.Env):
                 daily_productivity += productivity
                 if breakdown:
                     daily_breakdown_penalty += 200
-                    self.breakdown_count += 1
+                    self.episode_stats['breakdown_count'] += 1
                     
             elif tractor_action == 1:  # MAINTAIN
                 cost = self._maintain_tractor(i)
@@ -175,182 +154,232 @@ class AgrikaTractorFleetEnv(gym.Env):
             elif tractor_action == 2:  # REST
                 self._rest_tractor(i)
         
-        # Update environment state
+        # Update environment
         self._update_environment()
+        
+        # Update episode stats
+        self.episode_stats['total_productivity'] += daily_productivity
+        self.episode_stats['total_maintenance_cost'] += daily_maintenance_cost
         
         # Calculate reward
         reward = self._calculate_reward(
-            daily_productivity, 
-            daily_maintenance_cost, 
-            daily_breakdown_penalty
+            daily_productivity, daily_maintenance_cost, daily_breakdown_penalty
         )
         
         # Check termination
         terminated = self.current_day >= self.season_length
         
-        # Additional info
+        if terminated:
+            self.episode_stats['efficiency_score'] = (
+                self.episode_stats['total_productivity'] /
+                max(self.episode_stats['total_maintenance_cost'], 1)
+            )
+        
         info = {
             'day': self.current_day,
             'productivity': daily_productivity,
             'maintenance_cost': daily_maintenance_cost,
-            'breakdowns': self.breakdown_count,
-            'weather': self.weather_types[self.weather[0]]
+            'breakdowns': self.episode_stats['breakdown_count'],
+            'weather': self.weather_types[self.weather[0]],
+            'demand': self.demand_types[int(self.working_demand)],
+            'episode_stats': self.episode_stats.copy() if terminated else None
         }
         
         return self._get_observation(), reward, terminated, False, info
     
     def _operate_tractor(self, tractor_id: int) -> Tuple[float, bool]:
         """Operate a tractor and return productivity and breakdown status"""
+        # Weather impact
+        weather_multiplier = 0.3 if self.weather[0] == 0 else 1.2  # Rainy: 0.3, Dry: 1.2
         
-        # Weather impact on operation
-        weather_multiplier = {0: 1.0, 1: 0.7, 2: 0.3, 3: 1.2}[self.weather[0]]
-        
-        # Calculate base productivity
-        base_hours = min(self.max_hours_per_day, 
-                        self.tractors[tractor_id, 1] / 10)  # Condition affects hours
-        
-        actual_productivity = base_hours * weather_multiplier
+        # Calculate productivity based on condition
+        condition_factor = max(0.3, self.tractors[tractor_id, 1] / 100)
+        base_hours = min(self.max_hours_per_day, 8 + condition_factor * 4)
+        actual_productivity = base_hours * weather_multiplier * condition_factor
         
         # Update tractor state
-        self.tractors[tractor_id, 0] += base_hours  # Add hours
-        self.tractors[tractor_id, 1] -= random.uniform(1, 3)  # Condition degrades
-        self.tractors[tractor_id, 2] += 1  # Days since maintenance
+        self.tractors[tractor_id, 0] += base_hours
+        degradation = random.uniform(1.5, 4.0) * (1 + 0.5 * (self.weather[0] == 0))  # Worse in rain
+        self.tractors[tractor_id, 1] = max(0, self.tractors[tractor_id, 1] - degradation)
+        self.tractors[tractor_id, 2] += 1
         
-        # Check for breakdown
-        breakdown_probability = self._calculate_breakdown_probability(tractor_id)
-        breakdown = random.random() < breakdown_probability
+        # Breakdown check
+        breakdown_prob = self._calculate_breakdown_probability(tractor_id)
+        breakdown = random.random() < breakdown_prob
         
         if breakdown:
-            self.tractors[tractor_id, 1] = max(0, self.tractors[tractor_id, 1] - 20)
-            actual_productivity *= 0.5  # Reduced productivity due to breakdown
-        
+            self.tractors[tractor_id, 1] = max(0, self.tractors[tractor_id, 1] - 25)
+            actual_productivity *= 0.4
+            
         return actual_productivity, breakdown
     
     def _maintain_tractor(self, tractor_id: int) -> float:
         """Perform maintenance on a tractor"""
-        
-        # Calculate maintenance cost based on current condition
         condition = self.tractors[tractor_id, 1]
-        base_cost = 50 + (100 - condition) * 2  # More expensive for worse condition
+        base_cost = 50 + (100 - condition) * 1.5
         
-        # Restore tractor condition
-        self.tractors[tractor_id, 1] = min(100, condition + 30)
-        self.tractors[tractor_id, 2] = 0  # Reset days since maintenance
+        # Improve condition
+        condition_improvement = min(40, 100 - condition)
+        self.tractors[tractor_id, 1] = min(100, condition + condition_improvement)
+        self.tractors[tractor_id, 2] = 0
         
         return base_cost
     
     def _rest_tractor(self, tractor_id: int):
-        """Rest a tractor (no operation, minimal degradation)"""
-        self.tractors[tractor_id, 2] += 1  # Still counts as a day
-        # Minimal condition loss during rest
-        if random.random() < 0.1:
-            self.tractors[tractor_id, 1] -= 0.5
+        """Rest a tractor"""
+        self.tractors[tractor_id, 2] += 1
+        # Minimal wear during rest
+        if random.random() < 0.05:
+            self.tractors[tractor_id, 1] = max(0, self.tractors[tractor_id, 1] - 0.5)
     
     def _calculate_breakdown_probability(self, tractor_id: int) -> float:
-        """Calculate probability of breakdown based on tractor state"""
+        """Calculate breakdown probability"""
         hours_used = self.tractors[tractor_id, 0]
         condition = self.tractors[tractor_id, 1]
         days_since_maintenance = self.tractors[tractor_id, 2]
         
-        # Base probability increases with usage and poor maintenance
-        prob = 0.01  # Base 1% chance
+        prob = 0.005  # Base probability
         
+        # Hours factor
         if hours_used > self.breakdown_threshold:
-            prob += 0.05 * (hours_used - self.breakdown_threshold) / 20
-        
-        if condition < 50:
-            prob += 0.10 * (50 - condition) / 50
+            prob += 0.03 * (hours_used - self.breakdown_threshold) / 20
             
-        if days_since_maintenance > 10:
-            prob += 0.03 * (days_since_maintenance - 10) / 20
-        
+        # Condition factor
+        if condition < 50:
+            prob += 0.08 * (50 - condition) / 50
+            
+        # Maintenance factor
+        if days_since_maintenance > 15:
+            prob += 0.02 * (days_since_maintenance - 15) / 15
+            
         # Weather impact
-        if self.weather[0] == 2:  # Stormy weather increases breakdown risk
-            prob *= 2.0
+        prob *= 1.5 if self.weather[0] == 0 else 0.8  # Rainy: 1.5x, Dry: 0.8x
         
-        return min(prob, 0.5)  # Cap at 50%
+        return min(prob, 0.4)
     
     def _update_environment(self):
-        """Update environment state (weather, season)"""
+        """Update environment state"""
         self.current_day += 1
         
-        # Update weather (shift forecast and add new day)
-        self.weather[:-1] = self.weather[1:]
-        self.weather[-1] = random.randint(0, 3)
-        
-        # Update crop demand
-        self.crop_demand = self._calculate_crop_demand()
+        # Update weather with some persistence
+        if random.random() < 0.7:  # 70% chance weather persists
+            self.weather[0] = self.weather[1]
+            self.weather[1] = random.randint(0, 1)  # New next day
+        else:  # Weather changes
+            self.weather = np.random.randint(0, 2, size=2)
+            
+        self.working_demand = self._calculate_working_demand()
     
     def _calculate_reward(self, productivity: float, maintenance_cost: float, 
                          breakdown_penalty: float) -> float:
-        """Calculate reward based on multiple factors"""
-        
+        """Reward function emphasizing demand, weather, and maintenance"""
         # Base productivity reward
-        productivity_reward = productivity * 10  # 10 points per productive hour
+        productivity_reward = productivity * 12
         
-        # Demand fulfillment bonus
-        demand_fulfillment = min(productivity / (self.crop_demand / 10), 1.0)
-        demand_bonus = demand_fulfillment * 50
+        # Demand-based reward
+        target_productivity = {0: 10, 1: 20, 2: 30}[int(self.working_demand)]  # Low, Moderate, High
+        fulfillment_ratio = min(productivity / max(target_productivity, 1), 1.5)
+        demand_bonus = fulfillment_ratio * 50
         
-        # Maintenance cost penalty
-        maintenance_penalty = maintenance_cost
+        # Dry season bonus for high demand
+        if self.weather[0] == 1 and self.working_demand == 2:  # Dry + High demand
+            demand_bonus *= 2  # Double reward for meeting high demand in dry season
         
-        # Weather adaptation bonus
-        weather_bonus = 0
-        if self.weather[0] == 1 and productivity > 0:  # Working in rain
-            weather_bonus = 20
-        elif self.weather[0] == 2 and productivity == 0:  # Resting during storm
-            weather_bonus = 10
+        # Rainy season penalty for operating
+        rainy_penalty = 0
+        active_tractors = sum(1 for i in range(3) if self.current_tractor_actions[i] == 0)
+        if self.weather[0] == 0 and active_tractors > 0:  # Rainy + operating
+            rainy_penalty = active_tractors * 30  # Penalty per operating tractor
         
-        # Efficiency bonus for balanced operations
-        active_tractors = sum([1 for i in range(3) if self._is_tractor_active(i)])
-        if 1 <= active_tractors <= 2:  # Not overworking or underutilizing
-            efficiency_bonus = 15
-        else:
-            efficiency_bonus = 0
+        # Timely maintenance bonus
+        maintenance_bonus = 0
+        if maintenance_cost > 0:
+            # Count tractors being maintained with good condition
+            maintained_tractors = sum(1 for i in range(3) if self.current_tractor_actions[i] == 1)
+            avg_condition_maintained = np.mean([self.tractors[i, 1] for i in range(3) 
+                                              if self.current_tractor_actions[i] == 1])
+            if avg_condition_maintained > 50:  # Maintained before condition too low
+                maintenance_bonus = 20 * maintained_tractors
         
-        total_reward = (productivity_reward + demand_bonus + weather_bonus + 
-                       efficiency_bonus - maintenance_penalty - breakdown_penalty)
+        # Total penalties
+        total_penalty = maintenance_cost + breakdown_penalty + rainy_penalty
+        
+        total_reward = productivity_reward + demand_bonus + maintenance_bonus - total_penalty
         
         return total_reward
     
-    def _is_tractor_active(self, tractor_id: int) -> bool:
-        """Check if tractor was used today (simplified check)"""
-        return self.tractors[tractor_id, 1] < 100  # Condition decreased = was used
-    
     def render(self, mode='human'):
-        """Render the environment state"""
+        """Render environment status"""
         if mode == 'human':
-            print(f"\n=== Day {self.current_day}/{self.season_length} ===")
-            print(f"Weather: {self.weather_types[self.weather[0]]} (Forecast: {[self.weather_types[w] for w in self.weather[1:]]})")
-            print(f"Crop Demand: {self.crop_demand:.1f}")
-            print("\nTractor Status:")
+            print(f"\n{'='*50}")
+            print(f"Day {self.current_day}/{self.season_length} - Season Progress: {self.current_day/self.season_length*100:.1f}%")
+            print(f"Weather: {self.weather_types[self.weather[0]]} | Next Day: {self.weather_types[self.weather[1]]}")
+            print(f"Working Demand: {self.demand_types[int(self.working_demand)]} | Season Phase: {self._get_season_phase()}")
+            print(f"{'='*50}")
+            
+            print("TRACTOR FLEET STATUS:")
             for i in range(3):
                 hours, condition, days_maint = self.tractors[i]
-                print(f"  Tractor {i+1}: {hours:.1f}h used, {condition:.1f}% condition, {days_maint:.0f} days since maintenance")
-            print(f"\nTotal Breakdowns: {self.breakdown_count}")
+                status = self._get_tractor_status(condition)
+                print(f"  🚜 Tractor {i+1}: {hours:.1f}h | {condition:.1f}% condition ({status}) | {days_maint:.0f} days since maintenance")
+            
+            print(f"\nEPISODE STATISTICS:")
+            print(f"  Total Productivity: {self.episode_stats['total_productivity']:.1f}")
+            print(f"  Maintenance Costs: ${self.episode_stats['total_maintenance_cost']:.2f}")
+            print(f"  Breakdowns: {self.episode_stats['breakdown_count']}")
+            
+            if self.current_day >= self.season_length:
+                print(f"  Efficiency Score: {self.episode_stats['efficiency_score']:.2f}")
+                print("🏁 SEASON COMPLETED!")
+    
+    def _get_season_phase(self) -> str:
+        """Get current season phase"""
+        if self.current_day <= 20:
+            return "Planting"
+        elif self.current_day <= 40:
+            return "Growing"
+        else:
+            return "Harvest"
+    
+    def _get_tractor_status(self, condition: float) -> str:
+        """Get tractor status based on condition"""
+        if condition > 80:
+            return "Excellent"
+        elif condition > 60:
+            return "Good"
+        elif condition > 40:
+            return "Fair"
+        elif condition > 20:
+            return "Poor"
+        else:
+            return "Critical"
 
 # Test the environment
 if __name__ == "__main__":
-    # Create environment
     env = AgrikaTractorFleetEnv()
-    
-    # Test with random actions
     obs, info = env.reset()
-    print("Initial State Shape:", obs.shape)
-    print("Action Space:", env.action_space)
-    print("Observation Space:", env.observation_space)
     
-    # Run a few steps
-    for step in range(5):
-        action = env.action_space.sample()
+    print("🌾 AGRIKA TRACTOR FLEET MANAGEMENT SYSTEM")
+    print("Environment Test")
+    print(f"State Space: {env.observation_space}")
+    print(f"Action Space: {env.action_space}")
+    
+    # Test with intelligent actions
+    for step in range(10):
+        # Sample intelligent action (prefer maintenance when condition is low)
+        avg_condition = np.mean(env.tractors[:, 1])
+        if avg_condition < 50:
+            action = 13  # All maintain (1,1,1 in base 3)
+        elif env.weather[0] == 0:  # Rainy: prefer rest
+            action = 26  # All rest (2,2,2 in base 3)
+        else:
+            action = env.action_space.sample()
+            
         obs, reward, terminated, truncated, info = env.step(action)
         
-        print(f"\nStep {step + 1}:")
+        print(f"\n--- Step {step + 1} ---")
         print(f"Action: {action} -> {env.decode_action(action)}")
         print(f"Reward: {reward:.2f}")
-        print(f"Info: {info}")
-        
         env.render()
         
         if terminated:

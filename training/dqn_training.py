@@ -94,6 +94,7 @@ def train_dqn_optimized(trial=None):
         "exploration_initial_eps": 1.0,
         "exploration_final_eps": trial.suggest_categorical("exploration_final_eps", [0.05, 0.1]) if trial else 0.05,
         "max_grad_norm": 10,
+        "tensorboard_log": log_dir,
         "policy_kwargs": dict(net_arch=[256, 256, 128]),
         "verbose": 1,
         "device": "auto"
@@ -138,7 +139,7 @@ def train_dqn_optimized(trial=None):
 def tune_dqn():
     """Run hyperparameter tuning with optuna"""
     study = optuna.create_study(direction="maximize")
-    study.optimize(train_dqn_optimized, n_trials=3)  # Reduced to 3 trials
+    study.optimize(train_dqn_optimized, n_trials=10)
     print("Best parameters:", study.best_params)
     print("Best value:", study.best_value)
     return study
