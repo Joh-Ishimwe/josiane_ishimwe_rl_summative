@@ -1,26 +1,25 @@
-#environment/agrika_3d_viz.py
 import pybullet as p
 import pybullet_data
 import numpy as np
 import time
 import math
-from agrika_env import AgrikaTractorFleetEnv
+import os
+import matplotlib.pyplot as plt
+import random   
+import sys
+import importlib
+import gymnasium as gym
 from stable_baselines3 import PPO
+
+print("Visualization started — PPO MODEL VERSION")
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'environment')))
+from agrika_env import EnhancedAgrikaTractorFleetEnv
 
 class Agrika3DVisualizer:
     """
     Agrika Tractor Fleet Management
     Using PyBullet for intuitive rendering tailored for farmers
-    
-    Features:
-    - Weather: Dry (sun particles) or Rainy (rain drops)
-    - Tractors move with proper body orientation
-    - Maintenance signs at maintenance area
-    - Realistic straight-line field work movement
-    - Condition-based speed control
-    - Progress tracking with visual indicators for worked/unworked areas
-    - Tractor tags (T1, T2, T3) displayed above each tractor
-    - Terminal output mirroring environment's render information
     """
     
     def __init__(self, env):
@@ -121,17 +120,15 @@ class Agrika3DVisualizer:
             'tractor_tag': [0, 0, 0]          # Black for tractor tags (RGB, no alpha)
         }
     
-    def initialize_visualization(self, video_filename="agrika_simulation.mp4"):
-        """Initialize PyBullet 3D environment with video recording"""
+    def initialize_visualization(self):
+        """Initialize PyBullet 3D environment without video recording"""
+        print("🎬 Initializing PyBullet 3D visualization...")
         self.physics_client = p.connect(p.GUI)
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
         p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1)
         p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 0)
-        
-        # Start video recording (comment out if FFmpeg is not installed)
-        self.video_log_id = p.startStateLogging(p.STATE_LOGGING_VIDEO_MP4, video_filename)
         
         p.setGravity(0, 0, -9.81)
         p.setRealTimeSimulation(0)
@@ -143,6 +140,7 @@ class Agrika3DVisualizer:
         self._setup_camera()
         self._create_ui_elements()
         self._create_tractor_tags()
+        print("✅ 3D visualization initialized successfully!")
         
     def _create_farm_environment(self):
         """Create a limited 3D farm environment with defined boundaries"""
@@ -524,9 +522,9 @@ class Agrika3DVisualizer:
     
     def _get_season_phase(self) -> str:
         """Get current season phase"""
-        if self.env.current_day <= 20:
+        if self.env.current_day <= 2:
             return "Planting"
-        elif self.env.current_day <= 40:
+        elif self.env.current_day <= 5:
             return "Growing"
         else:
             return "Harvest"
@@ -682,7 +680,7 @@ class Agrika3DVisualizer:
                              if 10 < row_data['completion_percentage'] < 90)
         
         text_lines = [
-            f"Day: {info.get('day', 0)}/60",
+            f"Day: {info.get('day', 0)}/7",
             f"Weather: {info.get('weather', 'Dry')}",
             f"Demand: {info.get('demand', 'Moderate')}",
             f"Reward: {reward:.2f}",
@@ -750,9 +748,9 @@ class Agrika3DVisualizer:
             self.ui_elements[f'line_{i}'] = text_id
     
     def _render_terminal(self, obs, action, reward, info):
-        """Render environment status to terminal, mirroring AgrikaTractorFleetEnv.render"""
+        """Render environment status to terminal, mirroring EnhancedAgrikaTractorFleetEnv.render"""
         print(f"\n{'='*50}")
-        print(f"Day {info['day']}/{self.env.season_length} - Season Progress: {info['day']/self.env.season_length*100:.1f}%")
+        print(f"Day {info['day']}/7 - Season Progress: {info['day']/self.env.season_length*100:.1f}%")
         print(f"Weather: {info['weather']} | Next Day: {self.env.weather_types[self.env.weather[1]]}")
         print(f"Working Demand: {info['demand']} | Season Phase: {self._get_season_phase()}")
         print(f"Action: {action} -> {self.env.decode_action(action)}")
@@ -780,30 +778,122 @@ class Agrika3DVisualizer:
         time.sleep(0.01)  # Reduced sleep time for faster, smoother movement
     
     def close(self):
-        """Clean up visualization and stop video recording"""
+        """Clean up visualization"""
         if self.physics_client is not None:
-            # Stop video recording (comment out if FFmpeg is not installed)
-            p.stopStateLogging(self.video_log_id)
             p.disconnect(self.physics_client)
 
-# Test the 3D visualization
 def test_visualization():
-    env = AgrikaTractorFleetEnv()
+    """
+    Test function for the 3D visualization with TRAINED PPO MODEL
+    """
+    print("🔧 RUNNING PPO MODEL VERSION")
+    print("=" * 60)
+    
+    env = EnhancedAgrikaTractorFleetEnv()
     visualizer = Agrika3DVisualizer(env)
-    visualizer.initialize_visualization(video_filename="agrika_simulation.mp4")
     
-    model = PPO.load("C:/Users/jishi/OneDrive/Desktop/josiane_ishimwe_rl_summative/training/models/optimized_ppo/final_optimized_ppo.zip")
-    obs, info = env.reset()
-    for step in range(400):
-        action = env.action_space.sample()  # Random action for testing    
-        # action, _ = model.predict(obs, deterministic=True)  # Use trained model
-        obs, reward, terminated, truncated, info = env.step(action)
-        visualizer.render_frame(obs, action, reward, info)
+    # Load the trained PPO model
+    model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'pg', 'ppo', 'final_ppo_model')
+    try:
+        model = PPO.load(model_path, env=env, device='cpu')
+        print(f"✅ Loaded PPO model from {model_path}")
+    except Exception as e:
+        print(f"❌ Failed to load PPO model: {e}")
+        raise
+    
+    try:
+        visualizer.initialize_visualization()
         
-        if terminated or truncated:
+        if not p.isConnected():
+            raise RuntimeError("Failed to initialize PyBullet GUI")
+        
+        print("🎮 Running with TRAINED PPO MODEL")
+        
+        episode_rewards = []
+        episode_count = 0
+        
+        for episode in range(3):  # Run exactly 3 episodes
+            episode_count += 1
+            cumulative_reward = 0.0
+            print(f"\n🎯 Starting Episode {episode_count}")
+            
             obs, info = env.reset()
+            visualizer.update_visualization(obs, 0, 0.0, info)  # Initial render
+            
+            while True:
+                # Use PPO model predictions instead of random actions
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = env.step(action)
+                cumulative_reward += reward
+                
+                # Render the current frame
+                visualizer.render_frame(obs, action, reward, info)
+                
+                if terminated or truncated:
+                    episode_rewards.append(cumulative_reward)
+                    print(f"Episode {episode_count} Cumulative Reward: {cumulative_reward:.2f}")
+                    
+                    # Log results
+                    os.makedirs("logs", exist_ok=True)
+                    with open("logs/ppo_3d_rewards.txt", "a") as f:
+                        f.write(f"Episode {episode_count}: Cumulative Reward = {cumulative_reward:.2f}\n")
+                    break
+        
+        # Update UI to show episode rewards
+        print("\n📊 Episode Summary:")
+        for i, reward in enumerate(episode_rewards):
+            print(f"  Episode {i+1}: {reward:.2f}")
+            text_id = p.addUserDebugText(
+                text=f"Episode {i+1}: Reward = {reward:.2f}",
+                textPosition=[-22, -15 + (len(visualizer.ui_elements) + i) * 0.5, 8],
+                textColorRGB=[0, 0, 0],
+                textSize=1.0,
+                lifeTime=0
+            )
+            visualizer.ui_elements[f'episode_reward_{i}'] = text_id
+        
+        # Create a reward plot
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(8, 6))
+        plt.plot(range(1, len(episode_rewards) + 1), episode_rewards, 'bo-', linewidth=2, markersize=8)
+        plt.axhline(y=np.mean(episode_rewards), color='r', linestyle='--', 
+                    label=f'Mean: {np.mean(episode_rewards):.2f}')
+        plt.xlabel('Episode')
+        plt.ylabel('Cumulative Reward')
+        plt.title('PPO Policy Performance (3D Visualization Test)')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        os.makedirs('results/ppo', exist_ok=True)
+        plt.savefig('results/ppo/ppo_reward_plot.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print("✅ Reward plot saved to 'results/ppo/ppo_reward_plot.png'")
+        
+        print("\n🎉 Visualization test completed successfully!")
+        print("📋 Summary:")
+        print(f"   - Total Episodes: {len(episode_rewards)}")
+        print(f"   - Average Reward: {np.mean(episode_rewards):.2f}")
+        print(f"   - Best Episode: {max(episode_rewards):.2f}")
+        print(f"   - Worst Episode: {min(episode_rewards):.2f}")
+        print("\n💡 Close the PyBullet window when you're done exploring the visualization.")
+        
+        # Keep the visualization running until user closes it
+        while p.isConnected():
+            time.sleep(0.1)
     
-    visualizer.close()
+    except Exception as e:
+        print(f"❌ Error during visualization: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # Clean up
+        try:
+            visualizer.close()
+            env.close()
+            print("🧹 Resources cleaned up successfully.")
+        except Exception as e:
+            print(f"🧹 Cleanup error: {e}")
 
 if __name__ == "__main__":
     test_visualization()

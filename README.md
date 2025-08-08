@@ -1,5 +1,7 @@
 # 🚜 Agrika: Smart Tractor Fleet Management using Reinforcement Learning
 
+![Agrika Demo Screenshot](Demo_Screenshot.png)
+
 Welcome to **Agrika**, a reinforcement learning project designed to optimize tractor usage for smallholder farmers in Rwanda. This project simulates a 7-day farming week, managing tractor operations, maintenance, and rest — all while adapting to unpredictable weather and changing demand.
 
  **[Project Demo Video](https://docs.google.com/document/d/1Fli-sQ-m-vozlKXEKDls4BHIMEFLYi7O8SJGh8Rogio/edit?usp=sharing)**  
