@@ -4,11 +4,6 @@ This project develops Agrika, a smart tractor monitoring system designed for sma
 
 ![Agrika Demo Screenshot](Demo_Screenshot.png)
 
-
-
- **[Project Demo Video](https://docs.google.com/document/d/1Fli-sQ-m-vozlKXEKDls4BHIMEFLYi7O8SJGh8Rogio/edit?usp=sharing)**  
- **GitHub Repo**: https://github.com/Joh-Ishimwe/josiane_ishimwe_rl_summative
-
 ---
 
 ## Project Overview
@@ -101,10 +96,10 @@ Reward = Productivity - Maintenance Penalty - Breakdown Penalty
 
 | Metric               | PPO      | A2C      | DQN      | REINFORCE |
 |----------------------|----------|----------|----------|-----------|
-| Cumulative Reward     | ✅ ~240  | ✅ ~230  | ~150     | ~170      |
-| Training Stability    | ✅ Stable| ✅ Stable| Fluctuate| Increase   |
+| Cumulative Reward     |  ~240  |  ~230  | ~150     | ~170      |
+| Training Stability    |  Stable| Stable| Fluctuate| Increase   |
 | Episodes to Converge  | ~1,000   | ~1,000   | ~1,500   | ~2,000     |
-| Generalization        | ✅ Best  | Good     | Poor     | Moderate   |
+| Generalization        |  Best  | Good     | Poor     | Moderate   |
 
 ---
 
